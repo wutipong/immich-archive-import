@@ -21,7 +21,7 @@ default:
     immich_api_key: VtoFituqTaLrgxkX4t3xteZ7lAGgfSDHV0Aqkp4M # and this with immich API Key, please see below.
 ```
 
-The API Key can be obtained by open **⚙️Account Settings** and Open **API Keys section**. Create a new API key to include *asset, album, and albumAsset* permission (I haven't tried the fine-grain permission settings yet, please bare with me.). Make sure to copy the key after the creation, then use it on the configuration file as stated above.
+The API Key can be obtained by open **⚙️Account Settings** and Open **API Keys section**. Create a new API key to include *asset, album, and albumAsset* permission (I haven't tried the fine-grain permission settings yet, please bear with me.). Make sure to copy the key after the creation, then use it on the configuration file as stated above.
 
 # Running
 
@@ -60,3 +60,5 @@ You can use different profile for many different purpose, like enable debugging,
 # Development
 
 For the ease of development purpose, the project source files include self-contained immich's `docker-compose.yaml` with the volume section modified so it does not write to the folder directly. Use this file to start a localhost instance.
+
+Of course PR and issues are welcome.
