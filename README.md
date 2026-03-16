@@ -56,3 +56,7 @@ $ immich-archive-import --profile=dev --dir=path-of-archive
 ```
 
 You can use different profile for many different purpose, like enable debugging, connect to a different server, or import album with different user, etc.
+
+# Development
+
+For the ease of development purpose, the project source files include self-contained immich's `docker-compose.yaml` with the volume section modified so it does not write to the folder directly. Use this file to start a localhost instance.
