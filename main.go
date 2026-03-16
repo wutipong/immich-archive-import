@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"hash/fnv"
 	"io"
 	"io/fs"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -67,25 +69,44 @@ func Post[R any](url *url.URL, data interface{}, apiKey string) (result R, err e
 	if err != nil {
 		return result, err
 	}
-	req, err := http.NewRequest("POST", url.String(), bytes.NewBuffer(jsonData))
+
+	body := bytes.NewBuffer(jsonData)
+
+	return DoRequest[R]("POST", url, body, "application/json", apiKey)
+}
+
+func DoRequest[R any](method string, url *url.URL, body io.Reader, contentType string, apiKey string) (result R, err error) {
+	req, err := http.NewRequest(method, url.String(), body)
 	if err != nil {
-		return result, err
+		return
 	}
 	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("Content-Type", "application/json")
+
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return result, err
+		return
 	}
 	defer resp.Body.Close()
 	respBuff, err := io.ReadAll(resp.Body)
+
 	if err != nil {
-		return result, err
+		return
 	}
-	if err := json.Unmarshal(respBuff, &result); err != nil {
-		return result, err
+
+	if resp.StatusCode >= 300 {
+		err = fmt.Errorf("request failed with status code %d: %s", resp.StatusCode, string(respBuff))
+		return
 	}
-	return result, nil
+
+	err = json.Unmarshal(respBuff, &result)
+	if err != nil {
+		return
+	}
+	return
 }
 
 func PostAsset(url *url.URL, request AssetMediaRequest, reader io.Reader, apiKey string) (result AssetMediaResponseDto, err error) {
@@ -97,7 +118,7 @@ func PostAsset(url *url.URL, request AssetMediaRequest, reader io.Reader, apiKey
 	_ = writer.WriteField("fileModifiedAt", request.FileModifiedAt.Format(time.RFC3339))
 	_ = writer.WriteField("filename", request.Filename)
 
-	part, err := writer.CreateFormFile("assetData", request.Filename) // "file_param_name" is the field name on the server side
+	part, err := writer.CreateFormFile("assetData", request.Filename)
 	if err != nil {
 		slog.Error("Error creating form file:", slog.String("error", err.Error()))
 		return
@@ -106,47 +127,11 @@ func PostAsset(url *url.URL, request AssetMediaRequest, reader io.Reader, apiKey
 	io.Copy(part, reader)
 	_ = writer.Close()
 
-	req, err := http.NewRequest("POST", url.String(), &body)
-	if err != nil {
-		return
-	}
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return result, err
-	}
-	defer resp.Body.Close()
-	respBuff, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return result, err
-	}
-	if err := json.Unmarshal(respBuff, &result); err != nil {
-		return result, err
-	}
-	return result, nil
+	return DoRequest[AssetMediaResponseDto]("POST", url, &body, writer.FormDataContentType(), apiKey)
 }
 
 func Get[R any](url *url.URL, apiKey string) (result R, err error) {
-	req, err := http.NewRequest("GET", url.String(), nil)
-	if err != nil {
-		return result, err
-	}
-	req.Header.Set("x-api-key", apiKey)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return result, err
-	}
-	defer resp.Body.Close()
-	respBuff, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return result, err
-	}
-	if err := json.Unmarshal(respBuff, &result); err != nil {
-		return result, err
-	}
-	return result, nil
+	return DoRequest[R]("GET", url, nil, "", apiKey)
 }
 
 func Put[R any](url *url.URL, request interface{}, apiKey string) (result R, err error) {
@@ -154,26 +139,8 @@ func Put[R any](url *url.URL, request interface{}, apiKey string) (result R, err
 	if err != nil {
 		return result, err
 	}
-	req, err := http.NewRequest("PUT", url.String(), bytes.NewReader(body))
-	if err != nil {
-		return result, err
-	}
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return result, err
-	}
-	defer resp.Body.Close()
-	respBuff, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return result, err
-	}
-	if err := json.Unmarshal(respBuff, &result); err != nil {
-		return result, err
-	}
-	return result, nil
+	return DoRequest[R]("PUT", url, bytes.NewReader(body), "application/json", apiKey)
 }
 
 func main() {
@@ -184,11 +151,10 @@ func main() {
 		slog.Info("use settings from env file.")
 	}
 
-	// Retrieve variables using os.Getenv
 	immichURL := os.Getenv("IMMICH_URL")
 	immichAPIKey := os.Getenv("IMMICH_API_KEY")
 
-	slog.Info("Immich instance", slog.String("url", immichURL), slog.String("api_key", immichAPIKey))
+	slog.Info("Immich instance", slog.String("url", immichURL), slog.String("api_key", strings.Repeat("*", len(immichAPIKey))))
 
 	url, err := url.Parse(immichURL)
 	if err != nil {
@@ -210,22 +176,22 @@ func main() {
 		if d.IsDir() {
 			return nil
 		}
-		albumName, err := filepath.Rel(inputDir, path)
+		archivePath, err := filepath.Rel(inputDir, path)
 		if err != nil {
 			slog.Error("failed to get album name", slog.String("error", err.Error()))
 			return nil
 		}
-		slog.Debug("album name", slog.String("album_name", albumName))
+		slog.Debug("album name", slog.String("album_name", archivePath))
 
 		if slices.ContainsFunc(albums, func(a AlbumResponseDto) bool {
-			return a.AlbumName == albumName
+			return a.AlbumName == archivePath
 		}) {
-			slog.Info("album already exists. skipping.", slog.String("album_name", albumName))
+			slog.Info("album already exists. skipping.", slog.String("album_name", archivePath))
 			return nil
 		}
 
 		creatingAlbum := CreateAlbumRequest{
-			AlbumName: albumName,
+			AlbumName: archivePath,
 		}
 
 		createdAlbum, err := Post[CreateAlbumDto](url.JoinPath("/api/albums"), creatingAlbum, immichAPIKey)
@@ -253,40 +219,20 @@ func main() {
 				return nil
 			}
 
+			slog.Info("processing file", slog.String("archive", archivePath), slog.String("path", path))
+
 			if !slices.Contains(mediaExtensions, filepath.Ext(path)) {
-				slog.Debug("skipping non-media file", slog.String("path", path))
+				slog.Info("skipping non-media file", slog.String("archive", archivePath), slog.String("path", path))
 				return nil
 			}
 
-			info, err := d.Info()
+			asset, err := PutAsset(archivePath, fsys, path, d, url, immichAPIKey)
 			if err != nil {
+				slog.Info("failed to upload asset", slog.String("archive", archivePath), slog.String("path", path), slog.String("error", err.Error()))
 				return err
 			}
 
-			file, err := fsys.Open(path)
-			if err != nil {
-				return err
-			}
-			defer file.Close()
-
-			assetFileName := filepath.Join(albumName, path)
-
-			h := fnv.New64()
-			h.Write([]byte(assetFileName))
-			deviceAssetId := h.Sum64()
-
-			var request = AssetMediaRequest{
-				DeviceAssetId:  strconv.FormatUint(deviceAssetId, 10),
-				DeviceId:       "WEB",
-				FileCreatedAt:  info.ModTime(),
-				FileModifiedAt: info.ModTime(),
-				Filename:       path,
-			}
-
-			asset, err := PostAsset(url.JoinPath("/api/assets"), request, file, immichAPIKey)
-			if err != nil {
-				return err
-			}
+			slog.Info("uploaded asset", slog.String("archive", archivePath), slog.String("path", path), slog.Any("asset_response", asset))
 
 			assetIds = append(assetIds, asset.ID)
 
@@ -297,7 +243,9 @@ func main() {
 			return err
 		}
 
-		addAssetResult, err := Put[AddAssetsToAlbumResponse](
+		slog.Info("Add assets to album", slog.String("album_name", archivePath), slog.Int("asset_count", len(assetIds)))
+
+		result, err := Put[AddAssetsToAlbumResponse](
 			url.JoinPath("/api/albums/assets"), AddAssetsToAlbumRequest{
 				AssetIds: assetIds,
 				AlbumIds: []string{createdAlbum.ID},
@@ -306,7 +254,10 @@ func main() {
 			return err
 		}
 
-		slog.Info("add assets to album", slog.Any("result", addAssetResult))
+		if !result.Success {
+			slog.Error("failed to add assets to album", slog.Any("error", result.Error))
+			return fmt.Errorf(result.Error)
+		}
 
 		return nil
 	})
@@ -314,4 +265,46 @@ func main() {
 	if err != nil {
 		slog.Error("error creating albums", err)
 	}
+}
+
+func PutAsset(archivePath string, fsys fs.FS, path string, d fs.DirEntry, url *url.URL, apiKey string) (result AssetMediaResponseDto, err error) {
+	info, err := d.Info()
+	if err != nil {
+		return
+	}
+	file, err := fsys.Open(path)
+	if err != nil {
+		slog.Error("failed to open file", slog.String("path", path), slog.String("error", err.Error()))
+		return
+	}
+	defer file.Close()
+
+	assetFileName := filepath.Join(archivePath, path)
+
+	h := fnv.New64()
+	h.Write([]byte(assetFileName))
+	deviceAssetId := h.Sum64()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("deviceAssetId", strconv.FormatUint(deviceAssetId, 10))
+	_ = writer.WriteField("deviceId", "WEB")
+	_ = writer.WriteField("fileCreatedAt", info.ModTime().Format(time.RFC3339))
+	_ = writer.WriteField("fileModifiedAt", info.ModTime().Format(time.RFC3339))
+	_ = writer.WriteField("filename", path)
+
+	part, err := writer.CreateFormFile("assetData", path)
+	if err != nil {
+		slog.Error("Error creating form file:", slog.String("error", err.Error()))
+		return
+	}
+
+	_, err = io.Copy(part, file)
+	if err != nil {
+		slog.Error("Error copying file:", slog.String("error", err.Error()))
+		return
+	}
+	_ = writer.Close()
+
+	return DoRequest[AssetMediaResponseDto]("POST", url.JoinPath("/api/assets"), &body, writer.FormDataContentType(), apiKey)
 }
