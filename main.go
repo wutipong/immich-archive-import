@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -19,7 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/joho/godotenv"
 	"github.com/mholt/archives"
 )
 
@@ -62,6 +62,12 @@ var mediaExtensions = []string{
 	".mov",
 	".webm",
 	".wmv",
+}
+
+var archiveExtensions = []string{
+	".zip",
+	".7z",
+	".rar",
 }
 
 func Post[R any](url *url.URL, data interface{}, apiKey string) (result R, err error) {
@@ -165,15 +171,44 @@ func PostAsset(archivePath string, fsys fs.FS, path string, d fs.DirEntry, url *
 }
 
 func main() {
-	slog.SetLogLoggerLevel(slog.LevelDebug)
+	profileFlag := flag.String("profile", "default", "config profile to use")
+	inputDirFlag := flag.String("dir", "", "input directory containing archive files")
+	flag.Parse()
 
-	err := godotenv.Load()
-	if err == nil {
-		slog.Info("use settings from env file.")
+	if *inputDirFlag == "" {
+		slog.Error("input directory is required")
+		return
 	}
 
-	immichURL := os.Getenv("IMMICH_URL")
-	immichAPIKey := os.Getenv("IMMICH_API_KEY")
+	slog.Info("parameter", slog.String("profile", *profileFlag), slog.String("dir", *inputDirFlag))
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		slog.Error("failed to get user home directory", slog.String("error", err.Error()))
+		return
+	}
+
+	configPath := filepath.Join(homeDir, ".immich-archive-import", "config.yaml")
+
+	config, err := LoadConfig(*profileFlag, configPath)
+	if err != nil {
+		slog.Error("failed to load config. please check your config file.", slog.String("config path", configPath), slog.String("error", err.Error()))
+		return
+	}
+
+	switch config.LogLevel {
+	case "debug":
+		slog.SetLogLoggerLevel(slog.LevelDebug)
+	case "info":
+		slog.SetLogLoggerLevel(slog.LevelInfo)
+	case "error":
+		slog.SetLogLoggerLevel(slog.LevelError)
+	default:
+		slog.SetLogLoggerLevel(slog.LevelInfo)
+	}
+
+	immichURL := config.ImmichURL
+	immichAPIKey := config.ImmichAPIKey
 
 	slog.Info("Immich instance", slog.String("url", immichURL), slog.String("api_key", strings.Repeat("*", len(immichAPIKey))))
 
@@ -183,8 +218,7 @@ func main() {
 		return
 	}
 
-	inputDir := os.Getenv("INPUT_DIR")
-	slog.Info("input dir", slog.String("dir", inputDir))
+	inputDir := *inputDirFlag
 
 	albums, err := Get[[]AlbumResponseDto](url.JoinPath("/api/albums"), immichAPIKey)
 	if err != nil {
@@ -197,6 +231,12 @@ func main() {
 		if d.IsDir() {
 			return nil
 		}
+
+		if !slices.Contains(archiveExtensions, filepath.Ext(path)) {
+			slog.Info("skipping non-archive file", slog.String("path", path))
+			return nil
+		}
+
 		archivePath, err := filepath.Rel(inputDir, path)
 		if err != nil {
 			slog.Error("failed to get album name", slog.String("error", err.Error()))
