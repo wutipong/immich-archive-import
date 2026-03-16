@@ -109,27 +109,6 @@ func DoRequest[R any](method string, url *url.URL, body io.Reader, contentType s
 	return
 }
 
-func PostAsset(url *url.URL, request AssetMediaRequest, reader io.Reader, apiKey string) (result AssetMediaResponseDto, err error) {
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	_ = writer.WriteField("deviceAssetId", request.DeviceAssetId)
-	_ = writer.WriteField("deviceId", request.DeviceId)
-	_ = writer.WriteField("fileCreatedAt", request.FileCreatedAt.Format(time.RFC3339))
-	_ = writer.WriteField("fileModifiedAt", request.FileModifiedAt.Format(time.RFC3339))
-	_ = writer.WriteField("filename", request.Filename)
-
-	part, err := writer.CreateFormFile("assetData", request.Filename)
-	if err != nil {
-		slog.Error("Error creating form file:", slog.String("error", err.Error()))
-		return
-	}
-
-	io.Copy(part, reader)
-	_ = writer.Close()
-
-	return DoRequest[AssetMediaResponseDto]("POST", url, &body, writer.FormDataContentType(), apiKey)
-}
-
 func Get[R any](url *url.URL, apiKey string) (result R, err error) {
 	return DoRequest[R]("GET", url, nil, "", apiKey)
 }
@@ -141,6 +120,48 @@ func Put[R any](url *url.URL, request interface{}, apiKey string) (result R, err
 	}
 
 	return DoRequest[R]("PUT", url, bytes.NewReader(body), "application/json", apiKey)
+}
+
+func PostAsset(archivePath string, fsys fs.FS, path string, d fs.DirEntry, url *url.URL, apiKey string) (result AssetMediaResponseDto, err error) {
+	info, err := d.Info()
+	if err != nil {
+		return
+	}
+	file, err := fsys.Open(path)
+	if err != nil {
+		slog.Error("failed to open file", slog.String("path", path), slog.String("error", err.Error()))
+		return
+	}
+	defer file.Close()
+
+	assetFileName := filepath.Join(archivePath, path)
+
+	h := fnv.New64()
+	h.Write([]byte(assetFileName))
+	deviceAssetId := h.Sum64()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("deviceAssetId", strconv.FormatUint(deviceAssetId, 10))
+	_ = writer.WriteField("deviceId", "WEB")
+	_ = writer.WriteField("fileCreatedAt", info.ModTime().Format(time.RFC3339))
+	_ = writer.WriteField("fileModifiedAt", info.ModTime().Format(time.RFC3339))
+	_ = writer.WriteField("filename", path)
+
+	part, err := writer.CreateFormFile("assetData", path)
+	if err != nil {
+		slog.Error("Error creating form file:", slog.String("error", err.Error()))
+		return
+	}
+
+	_, err = io.Copy(part, file)
+	if err != nil {
+		slog.Error("Error copying file:", slog.String("error", err.Error()))
+		return
+	}
+	_ = writer.Close()
+
+	return DoRequest[AssetMediaResponseDto]("POST", url.JoinPath("/api/assets"), &body, writer.FormDataContentType(), apiKey)
 }
 
 func main() {
@@ -226,7 +247,7 @@ func main() {
 				return nil
 			}
 
-			asset, err := PutAsset(archivePath, fsys, path, d, url, immichAPIKey)
+			asset, err := PostAsset(archivePath, fsys, path, d, url, immichAPIKey)
 			if err != nil {
 				slog.Info("failed to upload asset", slog.String("archive", archivePath), slog.String("path", path), slog.String("error", err.Error()))
 				return err
@@ -265,46 +286,4 @@ func main() {
 	if err != nil {
 		slog.Error("error creating albums", err)
 	}
-}
-
-func PutAsset(archivePath string, fsys fs.FS, path string, d fs.DirEntry, url *url.URL, apiKey string) (result AssetMediaResponseDto, err error) {
-	info, err := d.Info()
-	if err != nil {
-		return
-	}
-	file, err := fsys.Open(path)
-	if err != nil {
-		slog.Error("failed to open file", slog.String("path", path), slog.String("error", err.Error()))
-		return
-	}
-	defer file.Close()
-
-	assetFileName := filepath.Join(archivePath, path)
-
-	h := fnv.New64()
-	h.Write([]byte(assetFileName))
-	deviceAssetId := h.Sum64()
-
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	_ = writer.WriteField("deviceAssetId", strconv.FormatUint(deviceAssetId, 10))
-	_ = writer.WriteField("deviceId", "WEB")
-	_ = writer.WriteField("fileCreatedAt", info.ModTime().Format(time.RFC3339))
-	_ = writer.WriteField("fileModifiedAt", info.ModTime().Format(time.RFC3339))
-	_ = writer.WriteField("filename", path)
-
-	part, err := writer.CreateFormFile("assetData", path)
-	if err != nil {
-		slog.Error("Error creating form file:", slog.String("error", err.Error()))
-		return
-	}
-
-	_, err = io.Copy(part, file)
-	if err != nil {
-		slog.Error("Error copying file:", slog.String("error", err.Error()))
-		return
-	}
-	_ = writer.Close()
-
-	return DoRequest[AssetMediaResponseDto]("POST", url.JoinPath("/api/assets"), &body, writer.FormDataContentType(), apiKey)
 }
