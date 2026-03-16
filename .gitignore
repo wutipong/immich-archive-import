@@ -1,0 +1,5 @@
+.input
+immich-archive-import.*
+immich-archive-import
+.env
+.DS_Store
