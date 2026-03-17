@@ -92,13 +92,20 @@ func Get[R any](url *url.URL, apiKey string) (result R, err error) {
 func Put[R any](url *url.URL, request any, apiKey string) (result R, err error) {
 	body, err := json.Marshal(request)
 	if err != nil {
-		return result, err
+		return
 	}
 
 	return DoRequestWithResult[R]("PUT", url, bytes.NewReader(body), "application/json", apiKey)
 }
 
-func PostAsset(archivePath string, path string, reader io.Reader, modDate time.Time, url *url.URL, apiKey string) (result AssetMediaResponseDto, err error) {
+func PostAsset(
+	archivePath string,
+	path string,
+	reader io.Reader,
+	modDate time.Time,
+	url *url.URL,
+	apiKey string,
+) (result AssetMediaResponseDto, err error) {
 	assetFileName := filepath.Join(archivePath, path)
 
 	h := fnv.New64()
@@ -115,18 +122,41 @@ func PostAsset(archivePath string, path string, reader io.Reader, modDate time.T
 
 	part, err := writer.CreateFormFile("assetData", path)
 	if err != nil {
-		slog.Error("Error creating form file:", slog.String("error", err.Error()))
+		err = fmt.Errorf("failed to create form file: %w", err)
 		return
 	}
 
 	_, err = io.Copy(part, reader)
 	if err != nil {
-		slog.Error("Error reading data:", slog.String("error", err.Error()))
+		err = fmt.Errorf("failed to write data to form file: %w", err)
 		return
 	}
 	_ = writer.Close()
 
-	return DoRequestWithResult[AssetMediaResponseDto]("POST", url.JoinPath("/api/assets"), &body, writer.FormDataContentType(), apiKey)
+	return DoRequestWithResult[AssetMediaResponseDto](
+		"POST", url.JoinPath("/api/assets"), &body, writer.FormDataContentType(), apiKey,
+	)
+}
+
+func DeleteEmptyAlbums(url *url.URL, apiKey string) error {
+	albums, err := Get[[]AlbumResponseDto](url.JoinPath("/api/albums"), apiKey)
+	if err != nil {
+		return fmt.Errorf("failed to get albums: %w", err)
+	}
+
+	slog.Debug("albums", slog.Any("albums", albums))
+	for _, album := range albums {
+		if album.AssetCount != 0 {
+			continue
+		}
+
+		slog.Debug("Deleting album", slog.String("name", album.AlbumName), slog.String("id", album.Id))
+		err = DeleteAlbum(album.Id, url, apiKey)
+		if err != nil {
+			return fmt.Errorf("failed to delete album '%s': %w", album.AlbumName, err)
+		}
+	}
+	return nil
 }
 
 func DeleteAlbum(id string, url *url.URL, apiKey string) error {
@@ -143,7 +173,6 @@ func DeleteAlbum(id string, url *url.URL, apiKey string) error {
 }
 
 func main() {
-	// Set global logger with custom options
 	slog.SetDefault(slog.New(
 		tint.NewHandler(os.Stdout, &tint.Options{
 			Level:      slog.LevelDebug,
@@ -263,11 +292,11 @@ func main() {
 		assetIds := make([]string, 0)
 
 		err = WalkArchive(ctx, path, archiveFile, func(ctx context.Context, f archives.FileInfo) error {
-			slog.Info("processing file", slog.String("archive", archiveFilePath), slog.String("entry", f.NameInArchive))
+			slog.Info("creating asset", slog.String("archive", archiveFilePath), slog.String("entry", f.NameInArchive))
 
 			file, err := f.Open()
 			if err != nil {
-				slog.Error("failed to open file in archive", slog.String("archive", archiveFilePath), slog.String("entry", f.NameInArchive), slog.String("error", err.Error()))
+				err = fmt.Errorf("failed to open archive entry %s/%s: %w", archiveFilePath, f.NameInArchive, err)
 				return err
 			}
 
@@ -275,11 +304,11 @@ func main() {
 
 			asset, err := PostAsset(archiveFilePath, f.NameInArchive, file, f.ModTime(), url, immichAPIKey)
 			if err != nil {
-				slog.Error("failed to upload asset", slog.String("archive", archiveFilePath), slog.String("path", path), slog.String("error", err.Error()))
+				err = fmt.Errorf("failed to upload asset %s/%s: %w", archiveFilePath, f.NameInArchive, err)
 				return err
 			}
 
-			slog.Info("uploaded asset", slog.String("archive", archiveFilePath), slog.String("path", path), slog.Any("asset_response", asset))
+			slog.Info("uploaded asset", slog.Any("asset", asset))
 
 			assetIds = append(assetIds, asset.ID)
 
@@ -287,16 +316,20 @@ func main() {
 		})
 
 		if err != nil {
-			slog.Error("failed to process archive", slog.String("archive", archiveFilePath), slog.String("error", err.Error()))
+			err = fmt.Errorf("failed upload assets from %s: %w", archiveFilePath, err)
 			return err
 		}
 
 		slog.Info("creating album", slog.String("name", archiveFilePath))
 
-		createdAlbum, err := Post[CreateAlbumDto](url.JoinPath("/api/albums"), CreateAlbumRequest{
-			AlbumName: archiveFilePath,
-			AssetIDs:  assetIds,
-		}, immichAPIKey)
+		createdAlbum, err := Post[CreateAlbumDto](
+			url.JoinPath("/api/albums"),
+			CreateAlbumRequest{
+				AlbumName: archiveFilePath,
+				AssetIDs:  assetIds,
+			},
+			immichAPIKey,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to create album: %w", err)
 		}
@@ -307,7 +340,7 @@ func main() {
 	})
 
 	if err != nil {
-		slog.Error("error creating albums", slog.String("err", err.Error()))
+		slog.Error("fails creating albums", slog.Any("error", err))
 	}
 }
 
@@ -335,25 +368,4 @@ func WalkArchive(ctx context.Context, archivePath string, archive *os.File, walk
 	})
 
 	return err
-}
-
-func DeleteEmptyAlbums(url *url.URL, immichAPIKey string) error {
-	albums, err := Get[[]AlbumResponseDto](url.JoinPath("/api/albums"), immichAPIKey)
-	if err != nil {
-		return fmt.Errorf("failed to get albums: %w", err)
-	}
-
-	slog.Debug("albums", slog.Any("albums", albums))
-	for _, album := range albums {
-		if album.AssetCount != 0 {
-			continue
-		}
-
-		slog.Debug("Deleting album", slog.String("name", album.AlbumName), slog.String("id", album.Id))
-		err = DeleteAlbum(album.Id, url, immichAPIKey)
-		if err != nil {
-			return fmt.Errorf("failed to delete album '%s': %w", album.AlbumName, err)
-		}
-	}
-	return nil
 }
