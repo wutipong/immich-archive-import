@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"hash/fnv"
@@ -20,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lmittmann/tint"
 	"github.com/mholt/archives"
 )
 
@@ -190,6 +190,14 @@ func DeleteAlbum(id string, url *url.URL, apiKey string) error {
 }
 
 func main() {
+	// Set global logger with custom options
+	slog.SetDefault(slog.New(
+		tint.NewHandler(os.Stdout, &tint.Options{
+			Level:      slog.LevelDebug,
+			TimeFormat: time.Kitchen,
+		}),
+	))
+
 	profileFlag := flag.String("profile", "default", "config profile to use")
 	inputDirFlag := flag.String("dir", "", "input directory containing archive files")
 	deleteEmptyAlbumsFlag := flag.Bool("delete-empty-albums", false, "Delete any empty albums.")
@@ -212,7 +220,12 @@ func main() {
 
 	config, err := LoadConfig(*profileFlag, configPath)
 	if err != nil {
-		slog.Error("failed to load config. please check your config file.", slog.String("config path", configPath), slog.String("error", err.Error()))
+		slog.Error(
+			"failed to load config. please check your config file.",
+			slog.String("config path", configPath),
+			slog.String("error", err.Error()),
+		)
+
 		return
 	}
 
@@ -230,7 +243,12 @@ func main() {
 	immichURL := config.ImmichURL
 	immichAPIKey := config.ImmichAPIKey
 
-	slog.Info("Immich instance", slog.String("url", immichURL), slog.String("api_key", strings.Repeat("*", len(immichAPIKey))))
+	slog.Info("Immich instance",
+		slog.String("url", immichURL),
+		slog.String("api_key",
+			strings.Repeat("*", len(immichAPIKey)),
+		),
+	)
 
 	url, err := url.Parse(immichURL)
 	if err != nil {
@@ -240,28 +258,21 @@ func main() {
 
 	inputDir := *inputDirFlag
 
+	if *deleteEmptyAlbumsFlag {
+		slog.Info("deleting empty albums")
+		err := DeleteEmptyAlbums(url, immichAPIKey)
+		if err != nil {
+			slog.Error("failed to delete empty albums", slog.String("error", err.Error()))
+			return
+		}
+	}
+
 	albums, err := Get[[]AlbumResponseDto](url.JoinPath("/api/albums"), immichAPIKey)
 	if err != nil {
 		slog.Error("failed to get albums", slog.String("error", err.Error()))
 		return
 	}
 	slog.Info("albums", slog.Any("albums", albums))
-
-	deleteEmptyAlbums := *deleteEmptyAlbumsFlag
-
-	if deleteEmptyAlbums {
-		for _, album := range albums {
-			if album.AssetCount != 0 {
-				continue
-			}
-
-			slog.Info("Deleting album", slog.String("name", album.AlbumName), slog.String("id", album.Id))
-			err = DeleteAlbum(album.Id, url, immichAPIKey)
-			if err != nil {
-				slog.Error("Error", slog.String("error", err.Error()))
-			}
-		}
-	}
 
 	err = filepath.WalkDir(inputDir, func(path string, d os.DirEntry, err error) error {
 		if d.IsDir() {
@@ -275,8 +286,7 @@ func main() {
 
 		archiveFilePath, err := filepath.Rel(inputDir, path)
 		if err != nil {
-			slog.Error("failed to get album name", slog.String("error", err.Error()))
-			return nil
+			return fmt.Errorf("failed to get album name: %w", err)
 		}
 
 		archiveFilePath = strings.ToValidUTF8(archiveFilePath, "-")
@@ -289,24 +299,11 @@ func main() {
 			return nil
 		}
 
-		creatingAlbum := CreateAlbumRequest{
-			AlbumName: archiveFilePath,
-		}
-
-		createdAlbum, err := Post[CreateAlbumDto](url.JoinPath("/api/albums"), creatingAlbum, immichAPIKey)
-		if err != nil {
-			slog.Error("failed to create album", slog.String("error", err.Error()))
-			return err
-		}
-
-		slog.Info("created album", slog.Any("album", createdAlbum))
-
 		ctx := context.Background()
 
 		archiveFile, err := os.Open(path)
 		if err != nil {
-			slog.Error("failed to open archive file", slog.String("error", err.Error()))
-			return err
+			return fmt.Errorf("failed to create virtual file system: %w", err)
 		}
 		defer archiveFile.Close()
 
@@ -341,22 +338,17 @@ func main() {
 			return err
 		}
 
-		slog.Info("Add assets to album", slog.String("album_name", archiveFilePath), slog.Int("asset_count", len(assetIds)))
+		slog.Info("creating album", slog.String("name", archiveFilePath))
 
-		result, err := Put[AddAssetsToAlbumResponse](
-			url.JoinPath("/api/albums/assets"), AddAssetsToAlbumRequest{
-				AssetIds: assetIds,
-				AlbumIds: []string{createdAlbum.ID},
-			}, immichAPIKey)
+		createdAlbum, err := Post[CreateAlbumDto](url.JoinPath("/api/albums"), CreateAlbumRequest{
+			AlbumName: archiveFilePath,
+			AssetIDs:  assetIds,
+		}, immichAPIKey)
 		if err != nil {
-			slog.Error("failed to add assets to album", slog.String("archive", archiveFilePath), slog.String("error", err.Error()))
-			return err
+			return fmt.Errorf("failed to create album: %w", err)
 		}
 
-		if !result.Success {
-			slog.Error("failed to add assets to album", slog.String("archive", archiveFilePath), slog.Any("server error", result.Error))
-			return errors.New(result.Error)
-		}
+		slog.Info("created album", slog.Any("album", createdAlbum))
 
 		return nil
 	})
@@ -390,4 +382,25 @@ func WalkArchive(ctx context.Context, archivePath string, archive *os.File, walk
 	})
 
 	return err
+}
+
+func DeleteEmptyAlbums(url *url.URL, immichAPIKey string) error {
+	albums, err := Get[[]AlbumResponseDto](url.JoinPath("/api/albums"), immichAPIKey)
+	if err != nil {
+		return fmt.Errorf("failed to get albums: %w", err)
+	}
+
+	slog.Debug("albums", slog.Any("albums", albums))
+	for _, album := range albums {
+		if album.AssetCount != 0 {
+			continue
+		}
+
+		slog.Debug("Deleting album", slog.String("name", album.AlbumName), slog.String("id", album.Id))
+		err = DeleteAlbum(album.Id, url, immichAPIKey)
+		if err != nil {
+			return fmt.Errorf("failed to delete album '%s': %w", album.AlbumName, err)
+		}
+	}
+	return nil
 }

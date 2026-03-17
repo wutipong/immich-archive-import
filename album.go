@@ -7,7 +7,8 @@ type AlbumResponseDto struct {
 }
 
 type CreateAlbumRequest struct {
-	AlbumName string `json:"albumName"`
+	AlbumName string   `json:"albumName"`
+	AssetIDs  []string `json:"assetIds"`
 }
 
 type CreateAlbumDto struct {
