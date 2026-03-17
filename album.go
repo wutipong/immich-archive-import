@@ -15,13 +15,3 @@ type CreateAlbumDto struct {
 	AlbumName string `json:"albumName"`
 	ID        string `json:"id"`
 }
-
-type AddAssetsToAlbumRequest struct {
-	AssetIds []string `json:"assetIds"`
-	AlbumIds []string `json:"albumIds"`
-}
-
-type AddAssetsToAlbumResponse struct {
-	Error   string `json:"error"`
-	Success bool   `json:"success"`
-}
