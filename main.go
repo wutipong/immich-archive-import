@@ -2,14 +2,12 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"hash/fnv"
 	"io"
-	"io/fs"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
@@ -21,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mholt/archives"
+	"github.com/gen2brain/go-unarr"
 )
 
 var mediaExtensions = []string{
@@ -146,19 +144,10 @@ func Put[R any](url *url.URL, request any, apiKey string) (result R, err error) 
 	return DoRequestWithResult[R]("PUT", url, bytes.NewReader(body), "application/json", apiKey)
 }
 
-func PostAsset(archivePath string, fsys fs.FS, path string, d fs.DirEntry, url *url.URL, apiKey string) (result AssetMediaResponseDto, err error) {
-	info, err := d.Info()
-	if err != nil {
-		return
-	}
-	file, err := fsys.Open(path)
-	if err != nil {
-		slog.Error("failed to open file", slog.String("path", path), slog.String("error", err.Error()))
-		return
-	}
-	defer file.Close()
+func PostAsset(archivePath string, archive *unarr.Archive, url *url.URL, apiKey string) (result AssetMediaResponseDto, err error) {
 
-	assetFileName := filepath.Join(archivePath, path)
+	assetFileName := filepath.Join(archivePath, archive.Name())
+	modDate := archive.ModTime()
 
 	h := fnv.New64()
 	h.Write([]byte(assetFileName))
@@ -168,24 +157,30 @@ func PostAsset(archivePath string, fsys fs.FS, path string, d fs.DirEntry, url *
 	writer := multipart.NewWriter(&body)
 	_ = writer.WriteField("deviceAssetId", strconv.FormatUint(deviceAssetId, 10))
 	_ = writer.WriteField("deviceId", "WEB")
-	_ = writer.WriteField("fileCreatedAt", info.ModTime().Format(time.RFC3339))
-	_ = writer.WriteField("fileModifiedAt", info.ModTime().Format(time.RFC3339))
-	_ = writer.WriteField("filename", path)
+	_ = writer.WriteField("fileCreatedAt", modDate.Format(time.RFC3339))
+	_ = writer.WriteField("fileModifiedAt", modDate.Format(time.RFC3339))
+	_ = writer.WriteField("filename", archive.Name())
 
-	part, err := writer.CreateFormFile("assetData", path)
+	part, err := writer.CreateFormFile("assetData", archive.Name())
 	if err != nil {
 		slog.Error("Error creating form file:", slog.String("error", err.Error()))
 		return
 	}
 
-	_, err = io.Copy(part, file)
+	_, err = io.Copy(part, archive)
 	if err != nil {
 		slog.Error("Error copying file:", slog.String("error", err.Error()))
 		return
 	}
 	_ = writer.Close()
 
-	return DoRequestWithResult[AssetMediaResponseDto]("POST", url.JoinPath("/api/assets"), &body, writer.FormDataContentType(), apiKey)
+	return DoRequestWithResult[AssetMediaResponseDto](
+		"POST",
+		url.JoinPath("/api/assets"),
+		&body,
+		writer.FormDataContentType(),
+		apiKey,
+	)
 }
 
 func DeleteAlbum(id string, url *url.URL, apiKey string) error {
@@ -313,31 +308,29 @@ func main() {
 
 		slog.Info("created album", slog.Any("album", createdAlbum))
 
-		ctx := context.Background()
 		assetIds := make([]string, 0)
-		fsys, err := archives.FileSystem(ctx, path, nil)
+
+		archive, err := unarr.NewArchive(path)
 		if err != nil {
-			slog.Error("failed to create virtual file system", slog.String("error", err.Error()))
-			return err
+			panic(err)
 		}
 
-		err = fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+		defer archive.Close()
+
+		for {
+			err = archive.Entry()
 			if err != nil {
-				return err
+				break
 			}
 
-			if d.IsDir() {
+			slog.Info("processing file", slog.String("archive", archivePath), slog.String("path", archive.Name()))
+
+			if !slices.Contains(mediaExtensions, filepath.Ext(archive.Name())) {
+				slog.Info("skipping non-media file", slog.String("archive", archivePath), slog.String("path", archive.Name()))
 				return nil
 			}
 
-			slog.Info("processing file", slog.String("archive", archivePath), slog.String("path", path))
-
-			if !slices.Contains(mediaExtensions, filepath.Ext(path)) {
-				slog.Info("skipping non-media file", slog.String("archive", archivePath), slog.String("path", path))
-				return nil
-			}
-
-			asset, err := PostAsset(archivePath, fsys, path, d, url, immichAPIKey)
+			asset, err := PostAsset(archivePath, archive, url, immichAPIKey)
 			if err != nil {
 				slog.Info("failed to upload asset", slog.String("archive", archivePath), slog.String("path", path), slog.String("error", err.Error()))
 				return err
@@ -346,10 +339,11 @@ func main() {
 			slog.Info("uploaded asset", slog.String("archive", archivePath), slog.String("path", path), slog.Any("asset_response", asset))
 
 			assetIds = append(assetIds, asset.ID)
+		}
 
-			return nil
-		})
-
+		if err == io.EOF {
+			err = nil
+		}
 		if err != nil {
 			return err
 		}
