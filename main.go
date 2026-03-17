@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/gen2brain/go-unarr"
+	"github.com/saintfish/chardet"
+	"golang.org/x/text/encoding/ianaindex"
 )
 
 var mediaExtensions = []string{
@@ -144,9 +146,14 @@ func Put[R any](url *url.URL, request any, apiKey string) (result R, err error) 
 	return DoRequestWithResult[R]("PUT", url, bytes.NewReader(body), "application/json", apiKey)
 }
 
-func PostAsset(archivePath string, archive *unarr.Archive, url *url.URL, apiKey string) (result AssetMediaResponseDto, err error) {
+func PostAsset(archivePath string,
+	entryName string,
+	archive *unarr.Archive,
+	url *url.URL,
+	apiKey string,
+) (result AssetMediaResponseDto, err error) {
 
-	assetFileName := filepath.Join(archivePath, archive.Name())
+	assetFileName := filepath.Join(archivePath, entryName)
 	modDate := archive.ModTime()
 
 	h := fnv.New64()
@@ -159,15 +166,20 @@ func PostAsset(archivePath string, archive *unarr.Archive, url *url.URL, apiKey 
 	_ = writer.WriteField("deviceId", "WEB")
 	_ = writer.WriteField("fileCreatedAt", modDate.Format(time.RFC3339))
 	_ = writer.WriteField("fileModifiedAt", modDate.Format(time.RFC3339))
-	_ = writer.WriteField("filename", archive.Name())
+	_ = writer.WriteField("filename", entryName)
 
-	part, err := writer.CreateFormFile("assetData", archive.Name())
+	part, err := writer.CreateFormFile("assetData", entryName)
 	if err != nil {
 		slog.Error("Error creating form file:", slog.String("error", err.Error()))
 		return
 	}
 
-	_, err = io.Copy(part, archive)
+	data, err := archive.ReadAll()
+	if err != nil {
+		slog.Error("Error reading from archive", slog.String("error", err.Error()))
+	}
+
+	_, err = part.Write(data)
 	if err != nil {
 		slog.Error("Error copying file:", slog.String("error", err.Error()))
 		return
@@ -317,20 +329,39 @@ func main() {
 
 		defer archive.Close()
 
+		detector := chardet.NewTextDetector()
+
 		for {
 			err = archive.Entry()
 			if err != nil {
 				break
 			}
 
-			slog.Info("processing file", slog.String("archive", archivePath), slog.String("path", archive.Name()))
+			entryName := archive.Name()
+			result, err := detector.DetectBest([]byte(archive.RawName()))
+			if err != nil {
+				slog.Warn("unable to determine charset.", slog.String("error", err.Error()))
+			} else {
+				slog.Info("detected charset.", slog.String("charset", result.Charset))
+
+				encoding, err := ianaindex.IANA.Encoding(result.Charset)
+				if err == nil {
+					decoder := encoding.NewDecoder()
+					b, err := decoder.Bytes([]byte(archive.RawName()))
+					if err == nil {
+						entryName = string(b)
+					}
+				}
+			}
+
+			slog.Info("processing file", slog.String("archive", archivePath), slog.String("path", entryName))
 
 			if !slices.Contains(mediaExtensions, filepath.Ext(archive.Name())) {
 				slog.Info("skipping non-media file", slog.String("archive", archivePath), slog.String("path", archive.Name()))
 				return nil
 			}
 
-			asset, err := PostAsset(archivePath, archive, url, immichAPIKey)
+			asset, err := PostAsset(archivePath, entryName, archive, url, immichAPIKey)
 			if err != nil {
 				slog.Info("failed to upload asset", slog.String("archive", archivePath), slog.String("path", path), slog.String("error", err.Error()))
 				return err
@@ -345,6 +376,7 @@ func main() {
 			err = nil
 		}
 		if err != nil {
+			slog.Error("Error uploading assets", slog.String("error", err.Error()))
 			return err
 		}
 
