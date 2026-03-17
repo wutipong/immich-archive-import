@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"hash/fnv"
@@ -299,8 +298,7 @@ func main() {
 
 		archivePath, err := filepath.Rel(inputDir, path)
 		if err != nil {
-			slog.Error("failed to get album name", slog.String("error", err.Error()))
-			return nil
+			return fmt.Errorf("failed to get album name: %w", err)
 		}
 
 		archivePath = strings.ToValidUTF8(archivePath, "-")
@@ -313,24 +311,11 @@ func main() {
 			return nil
 		}
 
-		creatingAlbum := CreateAlbumRequest{
-			AlbumName: archivePath,
-		}
-
-		createdAlbum, err := Post[CreateAlbumDto](url.JoinPath("/api/albums"), creatingAlbum, immichAPIKey)
-		if err != nil {
-			slog.Error("failed to create album", slog.String("error", err.Error()))
-			return err
-		}
-
-		slog.Info("created album", slog.Any("album", createdAlbum))
-
 		ctx := context.Background()
 		assetIds := make([]string, 0)
 		fsys, err := archives.FileSystem(ctx, path, nil)
 		if err != nil {
-			slog.Error("failed to create virtual file system", slog.String("error", err.Error()))
-			return err
+			return fmt.Errorf("failed to create virtual file system: %w", err)
 		}
 
 		err = fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
@@ -339,23 +324,27 @@ func main() {
 			}
 
 			if d.IsDir() {
+				slog.Debug("skipping directory", slog.String("archive", archivePath), slog.String("path", path))
 				return nil
 			}
 
 			slog.Info("processing file", slog.String("archive", archivePath), slog.String("path", path))
 
 			if !slices.Contains(mediaExtensions, filepath.Ext(path)) {
-				slog.Info("skipping non-media file", slog.String("archive", archivePath), slog.String("path", path))
+				slog.Debug("skipping non-media file", slog.String("archive", archivePath), slog.String("path", path))
 				return nil
 			}
 
 			asset, err := PostAsset(archivePath, fsys, path, d, url, immichAPIKey)
 			if err != nil {
-				slog.Info("failed to upload asset", slog.String("archive", archivePath), slog.String("path", path), slog.String("error", err.Error()))
-				return err
+				return fmt.Errorf("failed to upload asset '%s/%s': %w", archivePath, path, err)
 			}
 
-			slog.Info("uploaded asset", slog.String("archive", archivePath), slog.String("path", path), slog.Any("asset_response", asset))
+			slog.Info("uploaded asset",
+				slog.String("archive", archivePath),
+				slog.String("path", path),
+				slog.Any("asset_response", asset),
+			)
 
 			assetIds = append(assetIds, asset.ID)
 
@@ -366,21 +355,17 @@ func main() {
 			return err
 		}
 
-		slog.Info("Add assets to album", slog.String("album_name", archivePath), slog.Int("asset_count", len(assetIds)))
+		slog.Info("creating album", slog.String("name", archivePath))
 
-		result, err := Put[AddAssetsToAlbumResponse](
-			url.JoinPath("/api/albums/assets"), AddAssetsToAlbumRequest{
-				AssetIds: assetIds,
-				AlbumIds: []string{createdAlbum.ID},
-			}, immichAPIKey)
+		createdAlbum, err := Post[CreateAlbumDto](url.JoinPath("/api/albums"), CreateAlbumRequest{
+			AlbumName: archivePath,
+			AssetIDs:  assetIds,
+		}, immichAPIKey)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to create album: %w", err)
 		}
 
-		if !result.Success {
-			slog.Error("failed to add assets to album", slog.Any("error", result.Error))
-			return errors.New(result.Error)
-		}
+		slog.Info("created album", slog.Any("album", createdAlbum))
 
 		return nil
 	})
