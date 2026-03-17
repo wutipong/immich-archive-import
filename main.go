@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"hash/fnv"
@@ -78,27 +79,24 @@ func Post[R any](url *url.URL, data interface{}, apiKey string) (result R, err e
 
 	body := bytes.NewBuffer(jsonData)
 
-	return DoRequest[R]("POST", url, body, "application/json", apiKey)
+	return DoRequestWithResult[R]("POST", url, body, "application/json", apiKey)
 }
 
-func DoRequest[R any](method string, url *url.URL, body io.Reader, contentType string, apiKey string) (result R, err error) {
-	req, err := http.NewRequest(method, url.String(), body)
+func DoRequestWithResult[R any](
+	method string,
+	url *url.URL,
+	body io.Reader,
+	contentType string,
+	apiKey string,
+) (result R, err error) {
+	resp, err := DoRequest(method, url, body, contentType, apiKey)
 	if err != nil {
 		return
 	}
-	req.Header.Set("x-api-key", apiKey)
 
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return
-	}
 	defer resp.Body.Close()
-	respBuff, err := io.ReadAll(resp.Body)
 
+	respBuff, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return
 	}
@@ -115,8 +113,28 @@ func DoRequest[R any](method string, url *url.URL, body io.Reader, contentType s
 	return
 }
 
+func DoRequest(
+	method string,
+	url *url.URL,
+	body io.Reader,
+	contentType string,
+	apiKey string,
+) (resp *http.Response, err error) {
+	req, err := http.NewRequest(method, url.String(), body)
+	if err != nil {
+		return
+	}
+	req.Header.Set("x-api-key", apiKey)
+
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+
+	return http.DefaultClient.Do(req)
+}
+
 func Get[R any](url *url.URL, apiKey string) (result R, err error) {
-	return DoRequest[R]("GET", url, nil, "", apiKey)
+	return DoRequestWithResult[R]("GET", url, nil, "", apiKey)
 }
 
 func Put[R any](url *url.URL, request interface{}, apiKey string) (result R, err error) {
@@ -125,7 +143,7 @@ func Put[R any](url *url.URL, request interface{}, apiKey string) (result R, err
 		return result, err
 	}
 
-	return DoRequest[R]("PUT", url, bytes.NewReader(body), "application/json", apiKey)
+	return DoRequestWithResult[R]("PUT", url, bytes.NewReader(body), "application/json", apiKey)
 }
 
 func PostAsset(archivePath string, fsys fs.FS, path string, d fs.DirEntry, url *url.URL, apiKey string) (result AssetMediaResponseDto, err error) {
@@ -167,12 +185,26 @@ func PostAsset(archivePath string, fsys fs.FS, path string, d fs.DirEntry, url *
 	}
 	_ = writer.Close()
 
-	return DoRequest[AssetMediaResponseDto]("POST", url.JoinPath("/api/assets"), &body, writer.FormDataContentType(), apiKey)
+	return DoRequestWithResult[AssetMediaResponseDto]("POST", url.JoinPath("/api/assets"), &body, writer.FormDataContentType(), apiKey)
+}
+
+func DeleteAlbum(id string, url *url.URL, apiKey string) error {
+	resp, err := DoRequest("DELETE", url.JoinPath("api", "albums", id), nil, "", apiKey)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("request failed with status code %d: %s", resp.StatusCode, resp.Status)
+	}
+
+	return nil
 }
 
 func main() {
 	profileFlag := flag.String("profile", "default", "config profile to use")
 	inputDirFlag := flag.String("dir", "", "input directory containing archive files")
+	deleteEmptyAlbumsFlag := flag.Bool("delete-empty-albums", false, "Delete any empty albums.")
 	flag.Parse()
 
 	if *inputDirFlag == "" {
@@ -226,6 +258,22 @@ func main() {
 		return
 	}
 	slog.Info("albums", slog.Any("albums", albums))
+
+	deleteEmptyAlbums := *deleteEmptyAlbumsFlag
+
+	if deleteEmptyAlbums {
+		for _, album := range albums {
+			if album.AssetCount != 0 {
+				continue
+			}
+
+			slog.Info("Deleting album", slog.String("name", album.AlbumName), slog.String("id", album.Id))
+			err = DeleteAlbum(album.Id, url, immichAPIKey)
+			if err != nil {
+				slog.Error("Error", slog.String("error", err.Error()))
+			}
+		}
+	}
 
 	err = filepath.WalkDir(inputDir, func(path string, d os.DirEntry, err error) error {
 		if d.IsDir() {
@@ -319,13 +367,13 @@ func main() {
 
 		if !result.Success {
 			slog.Error("failed to add assets to album", slog.Any("error", result.Error))
-			return fmt.Errorf(result.Error)
+			return errors.New(result.Error)
 		}
 
 		return nil
 	})
 
 	if err != nil {
-		slog.Error("error creating albums", err)
+		slog.Error("error creating albums", slog.String("err", err.Error()))
 	}
 }
