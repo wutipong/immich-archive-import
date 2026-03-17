@@ -21,6 +21,9 @@ import (
 
 	"github.com/lmittmann/tint"
 	"github.com/mholt/archives"
+	"github.com/saintfish/chardet"
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/ianaindex"
 )
 
 func Post[R any](url *url.URL, data any, apiKey string) (result R, err error) {
@@ -291,18 +294,18 @@ func main() {
 
 		assetIds := make([]string, 0)
 
-		err = WalkArchive(ctx, path, archiveFile, func(ctx context.Context, f archives.FileInfo) error {
-			slog.Info("creating asset", slog.String("archive", archiveFilePath), slog.String("entry", f.NameInArchive))
+		err = WalkArchive(ctx, path, archiveFile, func(ctx context.Context, filename string, f archives.FileInfo) error {
+			slog.Info("creating asset", slog.String("archive", archiveFilePath), slog.String("entry", filename))
 
 			file, err := f.Open()
 			if err != nil {
-				err = fmt.Errorf("failed to open archive entry %s/%s: %w", archiveFilePath, f.NameInArchive, err)
+				err = fmt.Errorf("failed to open archive entry %s/%s: %w", archiveFilePath, filename, err)
 				return err
 			}
 
 			defer file.Close()
 
-			asset, err := PostAsset(archiveFilePath, f.NameInArchive, file, f.ModTime(), url, immichAPIKey)
+			asset, err := PostAsset(archiveFilePath, filename, file, f.ModTime(), url, immichAPIKey)
 			if err != nil {
 				err = fmt.Errorf("failed to upload asset %s/%s: %w", archiveFilePath, f.NameInArchive, err)
 				return err
@@ -344,7 +347,7 @@ func main() {
 	}
 }
 
-func WalkArchive(ctx context.Context, archivePath string, archive *os.File, walkFn func(ctx context.Context, f archives.FileInfo) error) error {
+func WalkArchive(ctx context.Context, archivePath string, archive *os.File, walkFn func(ctx context.Context, filename string, f archives.FileInfo) error) error {
 	format, stream, err := archives.Identify(ctx, archivePath, archive)
 	if err != nil {
 		return err
@@ -355,18 +358,46 @@ func WalkArchive(ctx context.Context, archivePath string, archive *os.File, walk
 		return fmt.Errorf("format does not support extraction")
 	}
 
+	detector := chardet.NewTextDetector()
+	var decoder *encoding.Decoder = nil
+	var chardetResult *chardet.Result = nil
+
 	err = extractor.Extract(ctx, stream, func(ctx context.Context, f archives.FileInfo) error {
 		if f.IsDir() {
 			return nil
 		}
 
+		filename := f.NameInArchive
+		if decoder == nil {
+
+			chardetResult, err = detector.DetectBest([]byte(filename))
+			if err != nil {
+				slog.Warn("failed to detect encoding. using filename as is.", slog.String("filename", filename), slog.String("error", err.Error()))
+			} else {
+				encoding, err := ianaindex.IANA.Encoding(chardetResult.Charset)
+				if err != nil {
+					slog.Warn("failed to get encoding. using filename as is.", slog.String("filename", filename), slog.String("charset", chardetResult.Charset), slog.String("error", err.Error()))
+				} else {
+					slog.Info("detected filename encoding", slog.String("filename", filename), slog.String("charset", chardetResult.Charset))
+					decoder = encoding.NewDecoder()
+				}
+			}
+		}
+
+		if decoder != nil {
+			filename, err = decoder.String(filename)
+			if err != nil {
+				slog.Warn("failed to decode filename. using filename as is.", slog.String("filename", filename), slog.String("charset", chardetResult.Charset), slog.String("error", err.Error()))
+			}
+		}
+
 		extension := filepath.Ext(f.NameInArchive)
 		if slices.Contains(archiveExtensions, extension) {
-			slog.Warn("archive contains nested archived. manually extraction required.", slog.String("filename", f.NameInArchive))
+			slog.Warn("archive contains nested archived. manually extraction required.", slog.String("filename", filename))
 		}
 
 		if slices.Contains(mediaExtensions, extension) {
-			return walkFn(ctx, f)
+			return walkFn(ctx, filename, f)
 		}
 
 		return nil
