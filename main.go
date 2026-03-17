@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
-	"io/fs"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
@@ -22,54 +21,10 @@ import (
 
 	"github.com/lmittmann/tint"
 	"github.com/mholt/archives"
+	"github.com/saintfish/chardet"
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/ianaindex"
 )
-
-var mediaExtensions = []string{
-	// Image formats
-	".avif",
-	".bmp",
-	".gif",
-	".heic",
-	".heif",
-	".jp2",
-	".jpeg",
-	".jpg",
-	".jpe",
-	".insp",
-	".jxl",
-	".png",
-	".psd",
-	".raw",
-	".rw2",
-	".svg",
-	".tif",
-	".tiff",
-	".webp",
-	// video format
-	".3gp",
-	".3gpp",
-	".avi",
-	".flv",
-	".m4v",
-	".mkv",
-	".mts",
-	".m2ts",
-	".m2t",
-	".mp4",
-	".insv",
-	".mpg",
-	".mpe",
-	".mpeg",
-	".mov",
-	".webm",
-	".wmv",
-}
-
-var archiveExtensions = []string{
-	".zip",
-	".7z",
-	".rar",
-}
 
 func Post[R any](url *url.URL, data any, apiKey string) (result R, err error) {
 	jsonData, err := json.Marshal(data)
@@ -140,24 +95,20 @@ func Get[R any](url *url.URL, apiKey string) (result R, err error) {
 func Put[R any](url *url.URL, request any, apiKey string) (result R, err error) {
 	body, err := json.Marshal(request)
 	if err != nil {
-		return result, err
+		return
 	}
 
 	return DoRequestWithResult[R]("PUT", url, bytes.NewReader(body), "application/json", apiKey)
 }
 
-func PostAsset(archivePath string, fsys fs.FS, path string, d fs.DirEntry, url *url.URL, apiKey string) (result AssetMediaResponseDto, err error) {
-	info, err := d.Info()
-	if err != nil {
-		return
-	}
-	file, err := fsys.Open(path)
-	if err != nil {
-		slog.Error("failed to open file", slog.String("path", path), slog.String("error", err.Error()))
-		return
-	}
-	defer file.Close()
-
+func PostAsset(
+	archivePath string,
+	path string,
+	reader io.Reader,
+	modDate time.Time,
+	url *url.URL,
+	apiKey string,
+) (result AssetMediaResponseDto, err error) {
 	assetFileName := filepath.Join(archivePath, path)
 
 	h := fnv.New64()
@@ -168,24 +119,47 @@ func PostAsset(archivePath string, fsys fs.FS, path string, d fs.DirEntry, url *
 	writer := multipart.NewWriter(&body)
 	_ = writer.WriteField("deviceAssetId", strconv.FormatUint(deviceAssetId, 10))
 	_ = writer.WriteField("deviceId", "WEB")
-	_ = writer.WriteField("fileCreatedAt", info.ModTime().Format(time.RFC3339))
-	_ = writer.WriteField("fileModifiedAt", info.ModTime().Format(time.RFC3339))
+	_ = writer.WriteField("fileCreatedAt", modDate.Format(time.RFC3339))
+	_ = writer.WriteField("fileModifiedAt", modDate.Format(time.RFC3339))
 	_ = writer.WriteField("filename", path)
 
 	part, err := writer.CreateFormFile("assetData", path)
 	if err != nil {
-		slog.Error("Error creating form file:", slog.String("error", err.Error()))
+		err = fmt.Errorf("failed to create form file: %w", err)
 		return
 	}
 
-	_, err = io.Copy(part, file)
+	_, err = io.Copy(part, reader)
 	if err != nil {
-		slog.Error("Error copying file:", slog.String("error", err.Error()))
+		err = fmt.Errorf("failed to write data to form file: %w", err)
 		return
 	}
 	_ = writer.Close()
 
-	return DoRequestWithResult[AssetMediaResponseDto]("POST", url.JoinPath("/api/assets"), &body, writer.FormDataContentType(), apiKey)
+	return DoRequestWithResult[AssetMediaResponseDto](
+		"POST", url.JoinPath("/api/assets"), &body, writer.FormDataContentType(), apiKey,
+	)
+}
+
+func DeleteEmptyAlbums(url *url.URL, apiKey string) error {
+	albums, err := Get[[]AlbumResponseDto](url.JoinPath("/api/albums"), apiKey)
+	if err != nil {
+		return fmt.Errorf("failed to get albums: %w", err)
+	}
+
+	slog.Debug("albums", slog.Any("albums", albums))
+	for _, album := range albums {
+		if album.AssetCount != 0 {
+			continue
+		}
+
+		slog.Debug("Deleting album", slog.String("name", album.AlbumName), slog.String("id", album.Id))
+		err = DeleteAlbum(album.Id, url, apiKey)
+		if err != nil {
+			return fmt.Errorf("failed to delete album '%s': %w", album.AlbumName, err)
+		}
+	}
+	return nil
 }
 
 func DeleteAlbum(id string, url *url.URL, apiKey string) error {
@@ -202,12 +176,26 @@ func DeleteAlbum(id string, url *url.URL, apiKey string) error {
 }
 
 func main() {
-	// Set global logger with custom options
+
+	logFile, err := os.OpenFile("immich-archive-import.log", os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		panic(err)
+	}
+	defer logFile.Close()
+
+	logLevel := &slog.LevelVar{}
+	logLevel.Set(slog.LevelInfo)
+
+	tintHandler := tint.NewHandler(os.Stdout, &tint.Options{
+		Level:      logLevel,
+		TimeFormat: time.Kitchen,
+	})
+	jsonHandler := slog.NewJSONHandler(logFile, &slog.HandlerOptions{
+		Level: logLevel,
+	})
+
 	slog.SetDefault(slog.New(
-		tint.NewHandler(os.Stdout, &tint.Options{
-			Level:      slog.LevelDebug,
-			TimeFormat: time.Kitchen,
-		}),
+		slog.NewMultiHandler(jsonHandler, tintHandler),
 	))
 
 	profileFlag := flag.String("profile", "default", "config profile to use")
@@ -244,12 +232,16 @@ func main() {
 	switch config.LogLevel {
 	case "debug":
 		slog.SetLogLoggerLevel(slog.LevelDebug)
+		logLevel.Set(slog.LevelDebug)
 	case "info":
 		slog.SetLogLoggerLevel(slog.LevelInfo)
+		logLevel.Set(slog.LevelInfo)
 	case "error":
 		slog.SetLogLoggerLevel(slog.LevelError)
+		logLevel.Set(slog.LevelError)
 	default:
 		slog.SetLogLoggerLevel(slog.LevelInfo)
+		logLevel.Set(slog.LevelInfo)
 	}
 
 	immichURL := config.ImmichURL
@@ -296,55 +288,49 @@ func main() {
 			return nil
 		}
 
-		archivePath, err := filepath.Rel(inputDir, path)
+		archiveFilePath, err := filepath.Rel(inputDir, path)
 		if err != nil {
 			return fmt.Errorf("failed to get album name: %w", err)
 		}
 
-		archivePath = strings.ToValidUTF8(archivePath, "-")
-		slog.Debug("album name", slog.String("album_name", archivePath))
+		archiveFilePath = strings.ToValidUTF8(archiveFilePath, "-")
+		slog.Debug("album name", slog.String("album_name", archiveFilePath))
 
 		if slices.ContainsFunc(albums, func(a AlbumResponseDto) bool {
-			return a.AlbumName == archivePath
+			return a.AlbumName == archiveFilePath
 		}) {
-			slog.Info("album already exists. skipping.", slog.String("album_name", archivePath))
+			slog.Info("album already exists. skipping.", slog.String("album_name", archiveFilePath))
 			return nil
 		}
 
 		ctx := context.Background()
-		assetIds := make([]string, 0)
-		fsys, err := archives.FileSystem(ctx, path, nil)
+
+		archiveFile, err := os.Open(path)
 		if err != nil {
 			return fmt.Errorf("failed to create virtual file system: %w", err)
 		}
+		defer archiveFile.Close()
 
-		err = fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+		assetIds := make([]string, 0)
+
+		err = WalkArchive(ctx, path, archiveFile, func(ctx context.Context, filename string, f archives.FileInfo) error {
+			slog.Info("creating asset", slog.String("archive", archiveFilePath), slog.String("entry", filename))
+
+			file, err := f.Open()
 			if err != nil {
+				err = fmt.Errorf("failed to open archive entry %s/%s: %w", archiveFilePath, filename, err)
 				return err
 			}
 
-			if d.IsDir() {
-				slog.Debug("skipping directory", slog.String("archive", archivePath), slog.String("path", path))
-				return nil
-			}
+			defer file.Close()
 
-			slog.Info("processing file", slog.String("archive", archivePath), slog.String("path", path))
-
-			if !slices.Contains(mediaExtensions, filepath.Ext(path)) {
-				slog.Debug("skipping non-media file", slog.String("archive", archivePath), slog.String("path", path))
-				return nil
-			}
-
-			asset, err := PostAsset(archivePath, fsys, path, d, url, immichAPIKey)
+			asset, err := PostAsset(archiveFilePath, filename, file, f.ModTime(), url, immichAPIKey)
 			if err != nil {
-				return fmt.Errorf("failed to upload asset '%s/%s': %w", archivePath, path, err)
+				err = fmt.Errorf("failed to upload asset %s/%s: %w", archiveFilePath, f.NameInArchive, err)
+				return err
 			}
 
-			slog.Info("uploaded asset",
-				slog.String("archive", archivePath),
-				slog.String("path", path),
-				slog.Any("asset_response", asset),
-			)
+			slog.Info("uploaded asset", slog.Any("asset", asset))
 
 			assetIds = append(assetIds, asset.ID)
 
@@ -352,15 +338,20 @@ func main() {
 		})
 
 		if err != nil {
+			err = fmt.Errorf("failed upload assets from %s: %w", archiveFilePath, err)
 			return err
 		}
 
-		slog.Info("creating album", slog.String("name", archivePath))
+		slog.Info("creating album", slog.String("name", archiveFilePath))
 
-		createdAlbum, err := Post[CreateAlbumDto](url.JoinPath("/api/albums"), CreateAlbumRequest{
-			AlbumName: archivePath,
-			AssetIDs:  assetIds,
-		}, immichAPIKey)
+		createdAlbum, err := Post[CreateAlbumDto](
+			url.JoinPath("/api/albums"),
+			CreateAlbumRequest{
+				AlbumName: archiveFilePath,
+				AssetIDs:  assetIds,
+			},
+			immichAPIKey,
+		)
 		if err != nil {
 			return fmt.Errorf("failed to create album: %w", err)
 		}
@@ -371,27 +362,65 @@ func main() {
 	})
 
 	if err != nil {
-		slog.Error("error creating albums", slog.String("err", err.Error()))
+		slog.Error("fails creating albums", slog.Any("error", err))
 	}
 }
 
-func DeleteEmptyAlbums(url *url.URL, immichAPIKey string) error {
-	albums, err := Get[[]AlbumResponseDto](url.JoinPath("/api/albums"), immichAPIKey)
+func WalkArchive(ctx context.Context, archivePath string, archive *os.File, walkFn func(ctx context.Context, filename string, f archives.FileInfo) error) error {
+	format, stream, err := archives.Identify(ctx, archivePath, archive)
 	if err != nil {
-		return fmt.Errorf("failed to get albums: %w", err)
+		return err
 	}
 
-	slog.Debug("albums", slog.Any("albums", albums))
-	for _, album := range albums {
-		if album.AssetCount != 0 {
-			continue
+	extractor, ok := format.(archives.Extractor)
+	if !ok {
+		return fmt.Errorf("format does not support extraction")
+	}
+
+	detector := chardet.NewTextDetector()
+	var decoder *encoding.Decoder = nil
+	var chardetResult *chardet.Result = nil
+
+	err = extractor.Extract(ctx, stream, func(ctx context.Context, f archives.FileInfo) error {
+		if f.IsDir() {
+			return nil
 		}
 
-		slog.Debug("Deleting album", slog.String("name", album.AlbumName), slog.String("id", album.Id))
-		err = DeleteAlbum(album.Id, url, immichAPIKey)
-		if err != nil {
-			return fmt.Errorf("failed to delete album '%s': %w", album.AlbumName, err)
+		filename := f.NameInArchive
+		if decoder == nil {
+
+			chardetResult, err = detector.DetectBest([]byte(filename))
+			if err != nil {
+				slog.Warn("failed to detect encoding. using filename as is.", slog.String("filename", filename), slog.String("error", err.Error()))
+			} else {
+				encoding, err := ianaindex.IANA.Encoding(chardetResult.Charset)
+				if err != nil {
+					slog.Warn("failed to get encoding. using filename as is.", slog.String("filename", filename), slog.String("charset", chardetResult.Charset), slog.String("error", err.Error()))
+				} else {
+					slog.Info("detected filename encoding", slog.String("filename", filename), slog.String("charset", chardetResult.Charset))
+					decoder = encoding.NewDecoder()
+				}
+			}
 		}
-	}
-	return nil
+
+		if decoder != nil {
+			filename, err = decoder.String(filename)
+			if err != nil {
+				slog.Warn("failed to decode filename. using filename as is.", slog.String("filename", filename), slog.String("charset", chardetResult.Charset), slog.String("error", err.Error()))
+			}
+		}
+
+		extension := filepath.Ext(f.NameInArchive)
+		if slices.Contains(archiveExtensions, extension) {
+			slog.Warn("archive contains nested archived. manually extraction required.", slog.String("filename", filename))
+		}
+
+		if slices.Contains(mediaExtensions, extension) {
+			return walkFn(ctx, filename, f)
+		}
+
+		return nil
+	})
+
+	return err
 }

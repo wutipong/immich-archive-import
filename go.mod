@@ -3,8 +3,11 @@ module github.com/wutipong/immich-archive-import
 go 1.26.1
 
 require (
+	github.com/lmittmann/tint v1.1.3
 	github.com/mholt/archives v0.1.5
+	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d
 	go.yaml.in/yaml/v4 v4.0.0-rc.4
+	golang.org/x/text v0.35.0
 )
 
 require (
@@ -17,7 +20,6 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/klauspost/pgzip v1.2.6 // indirect
-	github.com/lmittmann/tint v1.1.3 // indirect
 	github.com/mikelolasagasti/xz v1.0.1 // indirect
 	github.com/minio/minlz v1.0.1 // indirect
 	github.com/nwaples/rardecode/v2 v2.2.0 // indirect
@@ -26,5 +28,4 @@ require (
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/ulikunitz/xz v0.5.15 // indirect
 	go4.org v0.0.0-20230225012048-214862532bf5 // indirect
-	golang.org/x/text v0.29.0 // indirect
 )
