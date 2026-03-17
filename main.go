@@ -242,6 +242,8 @@ func main() {
 			slog.Error("failed to get album name", slog.String("error", err.Error()))
 			return nil
 		}
+
+		archivePath = strings.ToValidUTF8(archivePath, "-")
 		slog.Debug("album name", slog.String("album_name", archivePath))
 
 		if slices.ContainsFunc(albums, func(a AlbumResponseDto) bool {
