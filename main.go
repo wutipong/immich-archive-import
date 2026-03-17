@@ -71,7 +71,7 @@ var archiveExtensions = []string{
 	".rar",
 }
 
-func Post[R any](url *url.URL, data interface{}, apiKey string) (result R, err error) {
+func Post[R any](url *url.URL, data any, apiKey string) (result R, err error) {
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return result, err
@@ -137,7 +137,7 @@ func Get[R any](url *url.URL, apiKey string) (result R, err error) {
 	return DoRequestWithResult[R]("GET", url, nil, "", apiKey)
 }
 
-func Put[R any](url *url.URL, request interface{}, apiKey string) (result R, err error) {
+func Put[R any](url *url.URL, request any, apiKey string) (result R, err error) {
 	body, err := json.Marshal(request)
 	if err != nil {
 		return result, err
