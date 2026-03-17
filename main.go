@@ -360,7 +360,12 @@ func WalkArchive(ctx context.Context, archivePath string, archive *os.File, walk
 			return nil
 		}
 
-		if slices.Contains(mediaExtensions, filepath.Ext(f.NameInArchive)) {
+		extension := filepath.Ext(f.NameInArchive)
+		if slices.Contains(archiveExtensions, extension) {
+			slog.Warn("archive contains nested archived. manually extraction required.", slog.String("filename", f.NameInArchive))
+		}
+
+		if slices.Contains(mediaExtensions, extension) {
 			return walkFn(ctx, f)
 		}
 
