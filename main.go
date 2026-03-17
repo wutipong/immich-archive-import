@@ -176,11 +176,26 @@ func DeleteAlbum(id string, url *url.URL, apiKey string) error {
 }
 
 func main() {
+
+	logFile, err := os.OpenFile("immich-archive-import.log", os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		panic(err)
+	}
+	defer logFile.Close()
+
+	logLevel := &slog.LevelVar{}
+	logLevel.Set(slog.LevelInfo)
+
+	tintHandler := tint.NewHandler(os.Stdout, &tint.Options{
+		Level:      logLevel,
+		TimeFormat: time.Kitchen,
+	})
+	jsonHandler := slog.NewJSONHandler(logFile, &slog.HandlerOptions{
+		Level: logLevel,
+	})
+
 	slog.SetDefault(slog.New(
-		tint.NewHandler(os.Stdout, &tint.Options{
-			Level:      slog.LevelDebug,
-			TimeFormat: time.Kitchen,
-		}),
+		slog.NewMultiHandler(jsonHandler, tintHandler),
 	))
 
 	profileFlag := flag.String("profile", "default", "config profile to use")
@@ -217,12 +232,16 @@ func main() {
 	switch config.LogLevel {
 	case "debug":
 		slog.SetLogLoggerLevel(slog.LevelDebug)
+		logLevel.Set(slog.LevelDebug)
 	case "info":
 		slog.SetLogLoggerLevel(slog.LevelInfo)
+		logLevel.Set(slog.LevelInfo)
 	case "error":
 		slog.SetLogLoggerLevel(slog.LevelError)
+		logLevel.Set(slog.LevelError)
 	default:
 		slog.SetLogLoggerLevel(slog.LevelInfo)
+		logLevel.Set(slog.LevelInfo)
 	}
 
 	immichURL := config.ImmichURL
