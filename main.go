@@ -283,6 +283,11 @@ func main() {
 			return nil
 		}
 
+		if err != nil {
+			slog.Warn("failed to access path. skipping.", slog.String("path", path), slog.String("error", err.Error()))
+			return nil
+		}
+
 		if !slices.Contains(archiveExtensions, filepath.Ext(path)) {
 			slog.Info("skipping non-archive file", slog.String("path", path))
 			return nil
@@ -293,7 +298,6 @@ func main() {
 			return fmt.Errorf("failed to get album name: %w", err)
 		}
 
-		archiveFilePath = strings.ToValidUTF8(archiveFilePath, "-")
 		slog.Debug("album name", slog.String("album_name", archiveFilePath))
 
 		if slices.ContainsFunc(albums, func(a AlbumResponseDto) bool {
@@ -338,8 +342,8 @@ func main() {
 		})
 
 		if err != nil {
-			err = fmt.Errorf("failed upload assets from %s: %w", archiveFilePath, err)
-			return err
+			slog.Error("failed to upload assets", slog.String("archive", archiveFilePath), slog.String("error", err.Error()))
+			return nil
 		}
 
 		slog.Info("creating album", slog.String("name", archiveFilePath))
