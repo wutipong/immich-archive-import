@@ -295,7 +295,8 @@ func main() {
 
 		archiveFilePath, err := filepath.Rel(inputDir, path)
 		if err != nil {
-			return fmt.Errorf("failed to get album name: %w", err)
+			slog.Error("failed to determine album name.", slog.String("error", err.Error()))
+			return nil
 		}
 
 		slog.Debug("album name", slog.String("album_name", archiveFilePath))
@@ -303,7 +304,7 @@ func main() {
 		if slices.ContainsFunc(albums, func(a AlbumResponseDto) bool {
 			return a.AlbumName == archiveFilePath
 		}) {
-			slog.Info("album already exists. skipping.", slog.String("album_name", archiveFilePath))
+			slog.Warn("album already exists. skipping.", slog.String("album_name", archiveFilePath))
 			return nil
 		}
 
@@ -311,7 +312,8 @@ func main() {
 
 		archiveFile, err := os.Open(path)
 		if err != nil {
-			return fmt.Errorf("failed to create virtual file system: %w", err)
+			slog.Warn("failed to open archive", slog.String("file", archiveFilePath))
+			return nil
 		}
 		defer archiveFile.Close()
 
@@ -322,16 +324,24 @@ func main() {
 
 			file, err := f.Open()
 			if err != nil {
-				err = fmt.Errorf("failed to open archive entry %s/%s: %w", archiveFilePath, filename, err)
-				return err
+				slog.Error("failed to open archive entry",
+					slog.String("archive", archiveFilePath),
+					slog.String("entry", filename),
+					slog.String("error", err.Error()),
+				)
+				return nil
 			}
 
 			defer file.Close()
 
 			asset, err := PostAsset(archiveFilePath, filename, file, f.ModTime(), url, immichAPIKey)
 			if err != nil {
-				err = fmt.Errorf("failed to upload asset %s/%s: %w", archiveFilePath, f.NameInArchive, err)
-				return err
+				slog.Error("failed to oupload asset",
+					slog.String("archive", archiveFilePath),
+					slog.String("entry", filename),
+					slog.String("error", err.Error()),
+				)
+				return nil
 			}
 
 			slog.Info("uploaded asset", slog.Any("asset", asset))
@@ -342,7 +352,11 @@ func main() {
 		})
 
 		if err != nil {
-			slog.Error("failed to upload assets", slog.String("archive", archiveFilePath), slog.String("error", err.Error()))
+			slog.Error(
+				"failed to upload assets",
+				slog.String("archive", archiveFilePath),
+				slog.String("error", err.Error()),
+			)
 			return nil
 		}
 
@@ -357,7 +371,8 @@ func main() {
 			immichAPIKey,
 		)
 		if err != nil {
-			return fmt.Errorf("failed to create album: %w", err)
+			slog.Error("failed to create album", slog.String("error", err.Error()))
+			return nil
 		}
 
 		slog.Info("created album", slog.Any("album", createdAlbum))
@@ -392,7 +407,6 @@ func WalkArchive(ctx context.Context, archivePath string, archive *os.File, walk
 
 		filename := f.NameInArchive
 		if decoder == nil {
-
 			chardetResult, err = detector.DetectBest([]byte(filename))
 			if err != nil {
 				slog.Warn("failed to detect encoding. using filename as is.", slog.String("filename", filename), slog.String("error", err.Error()))
