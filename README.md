@@ -12,8 +12,7 @@ If there's another album with the name of said relative path, the archive will b
 $ go install github.com/wutipong/immich-archive-import@latest
 ```
 
-After that it requires a configuration file. This file is located at `
-`/.immich-archive-import/config.yml`. Please create it first otherwise the tool won't start. The content of the file should looks like this.
+After that it requires a configuration file. This file is located at `~/.immich-archive-import/config.yml`. Please create it first otherwise the tool won't start. The content of the file should looks like this.
 
 ```yaml
 default:
